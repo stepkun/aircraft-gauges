@@ -1,0 +1,17 @@
+# Copyright © 2026 Stephan Kunz
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "aircraft-gauges"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Aircraft instruments as a Slint library, for the desktop and for microcontrollers"
+# the .slint files and the font are the library, the Rust code only tells where they are
+include = ["/src", "/ui", "/LICENSE", "/README.md"]
+
+[dependencies]
+
+[dev-dependencies]
+slint-interpreter = "1.18.1"
+spin_on = "0.1.1"

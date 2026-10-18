@@ -1,0 +1,44 @@
+# Copyright © 2026 Stephan Kunz
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # the static dial paths are generated, a changed generator or hand-edited paths must be
+  # regenerated, and no static box may overlap a hand
+  dial-paths:
+    name: generated dial paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tools/dial-paths.py --check
+
+  check:
+    name: cargo
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # the test program (examples/gallery.rs) uses the Slint interpreter with the desktop
+      # backend, which links against fontconfig, xkbcommon, wayland and xcb
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev libxkbcommon-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # --all-targets includes the test program
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

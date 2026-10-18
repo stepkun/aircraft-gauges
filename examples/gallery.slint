@@ -1,0 +1,235 @@
+// Copyright © 2026 Stephan Kunz
+// SPDX-License-Identifier: GPL-3.0-only
+// Test program of the library: every instrument, every value adjustable
+
+import { Slider, Switch, ScrollView } from "std-widgets.slint";
+import {
+    Attitude,
+    Altimeter,
+    Airspeed,
+    Heading,
+    VerticalSpeed,
+    TurnCoordinator,
+    Theme,
+} from "@aircraft-gauges/lib.slint";
+import "@aircraft-gauges/fonts/NotoSans-Regular.ttf";
+
+// one value: name, slider and the value with its unit
+component Control inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> unit;
+    in property <float> minimum;
+    in property <float> maximum;
+    // digits after the decimal point of the shown value
+    in property <int> digits: 0;
+    in-out property <float> value;
+
+    spacing: 8px;
+    Text {
+        text: root.label;
+        min-width: 110px;
+        vertical-alignment: center;
+        color: Theme.marking;
+    }
+
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+        min-width: 160px;
+    }
+
+    Text {
+        text: root.digits == 0 ? "\{round(root.value)} \{root.unit}" : "\{round(root.value * 100) / 100} \{root.unit}";
+        min-width: 90px;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        color: Theme.marking;
+    }
+}
+
+export component Gallery inherits Window {
+    // the instrument values, in the units of the instrument properties
+    property <float> roll: 0;
+    property <float> pitch: 0;
+    property <float> altitude: 0;
+    property <float> airspeed: 0;
+    property <float> heading: 0;
+    property <float> vertical_speed: 0;
+    property <float> turn_rate: 0;
+    property <float> slip: 0;
+    // size of each instrument; Theme.reference_size is the size on the displays of slint-demos
+    property <float> size: Theme.reference_size / 1px;
+    property <bool> animate: false;
+    property <float> time: 0;
+
+    title: "aircraft-gauges";
+    default-font-family: "Noto Sans";
+    background: Theme.background;
+    preferred-width: 1300px;
+    preferred-height: 800px;
+
+    // the demo movement, roughly that of slint-demos
+    Timer {
+        interval: 20ms;
+        running: root.animate;
+        triggered => {
+            root.time += 0.02;
+            root.roll = 30 * sin(root.time * 45deg);
+            root.pitch = 10 * sin(root.time * 72deg);
+            root.altitude = 5000 + 5000 * sin(root.time * 6deg);
+            root.airspeed = 105 + 75 * sin(root.time * 12deg);
+            root.heading = mod(root.time * 6, 360);
+            root.vertical_speed = 2200 * sin(root.time * 9deg);
+            root.turn_rate = 5 * sin(root.time * 12deg);
+            root.slip = 0.6 * sin(root.time * 30deg);
+        }
+    }
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 16px;
+
+        ScrollView {
+            // standard layout ("basic T")
+            GridLayout {
+                spacing: 8px;
+                Row {
+                    Airspeed {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        airspeed: root.airspeed;
+                    }
+
+                    Attitude {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        roll: root.roll * 1deg;
+                        pitch: root.pitch * 1deg;
+                    }
+
+                    Altimeter {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        altitude: root.altitude;
+                    }
+                }
+
+                Row {
+                    TurnCoordinator {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        turn_rate: root.turn_rate;
+                        slip: root.slip;
+                    }
+
+                    Heading {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        heading: root.heading * 1deg;
+                    }
+
+                    VerticalSpeed {
+                        width: root.size * 1px;
+                        height: root.size * 1px;
+                        vertical_speed: root.vertical_speed;
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 4px;
+            alignment: start;
+            horizontal-stretch: 0;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "demo movement";
+                    min-width: 110px;
+                    vertical-alignment: center;
+                    color: Theme.marking;
+                }
+
+                Switch {
+                    checked <=> root.animate;
+                }
+            }
+
+            Control {
+                label: "size";
+                unit: "px";
+                minimum: 80;
+                maximum: 480;
+                value <=> root.size;
+            }
+
+            Control {
+                label: "roll";
+                unit: "°";
+                minimum: -90;
+                maximum: 90;
+                value <=> root.roll;
+            }
+
+            Control {
+                label: "pitch";
+                unit: "°";
+                minimum: -40;
+                maximum: 40;
+                value <=> root.pitch;
+            }
+
+            Control {
+                label: "altitude";
+                unit: "ft";
+                minimum: -1000;
+                maximum: 30000;
+                value <=> root.altitude;
+            }
+
+            Control {
+                label: "airspeed";
+                unit: "kt";
+                minimum: 0;
+                maximum: 240;
+                value <=> root.airspeed;
+            }
+
+            Control {
+                label: "heading";
+                unit: "°";
+                minimum: 0;
+                maximum: 360;
+                value <=> root.heading;
+            }
+
+            Control {
+                label: "vertical speed";
+                unit: "ft/min";
+                minimum: -2500;
+                maximum: 2500;
+                value <=> root.vertical_speed;
+            }
+
+            Control {
+                label: "turn rate";
+                unit: "°/s";
+                minimum: -8;
+                maximum: 8;
+                digits: 1;
+                value <=> root.turn_rate;
+            }
+
+            Control {
+                label: "slip";
+                unit: "";
+                minimum: -1.2;
+                maximum: 1.2;
+                digits: 2;
+                value <=> root.slip;
+            }
+        }
+    }
+}
