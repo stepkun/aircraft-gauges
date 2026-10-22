@@ -1,0 +1,140 @@
+// Copyright © 2026 Stephan Kunz
+// SPDX-License-Identifier: GPL-3.0-only
+// Test program of the combined display: every value adjustable
+
+import { Switch } from "std-widgets.slint";
+import { Control } from "controls.slint";
+import { Combined, Theme } from "@aircraft-gauges/lib.slint";
+import "@aircraft-gauges/fonts/NotoSans-Regular.ttf";
+
+export component CombinedPanel inherits Window {
+    // the values, in the units of the instrument properties
+    property <float> roll: 0;
+    property <float> pitch: 0;
+    property <float> altitude: 0;
+    property <float> airspeed: 0;
+    property <float> heading: 0;
+    property <float> vertical_speed: 0;
+    // height of the display, 4:3; Theme.reference_size is the height on the displays of
+    // slint-demos (320x240 in landscape)
+    property <float> size: Theme.reference_size / 1px;
+    property <bool> animate: false;
+    property <float> time: 0;
+
+    title: "aircraft-gauges: combined";
+    default-font-family: "Noto Sans";
+    background: Theme.background;
+    preferred-width: 900px;
+    preferred-height: 560px;
+
+    // the demo movement of the basic panel example, roughly that of slint-demos
+    Timer {
+        interval: 20ms;
+        running: root.animate;
+        triggered => {
+            root.time += 0.02;
+            root.roll = 30 * sin(root.time * 45deg);
+            root.pitch = 10 * sin(root.time * 72deg);
+            root.altitude = 5000 + 5000 * sin(root.time * 6deg);
+            root.airspeed = 105 + 75 * sin(root.time * 12deg);
+            root.heading = mod(root.time * 6, 360);
+            root.vertical_speed = 2200 * sin(root.time * 9deg);
+        }
+    }
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 16px;
+
+        Rectangle {
+            Combined {
+                x: 0;
+                y: 0;
+                width: root.size * 4 / 3 * 1px;
+                height: root.size * 1px;
+                roll: root.roll * 1deg;
+                pitch: root.pitch * 1deg;
+                airspeed: root.airspeed;
+                altitude: root.altitude;
+                vertical_speed: root.vertical_speed;
+                heading: root.heading * 1deg;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 4px;
+            alignment: start;
+            horizontal-stretch: 0;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "demo movement";
+                    min-width: 110px;
+                    vertical-alignment: center;
+                    color: Theme.marking;
+                }
+
+                Switch {
+                    checked <=> root.animate;
+                }
+            }
+
+            Control {
+                label: "size";
+                unit: "px";
+                minimum: 120;
+                maximum: 720;
+                value <=> root.size;
+            }
+
+            Control {
+                label: "roll";
+                unit: "°";
+                minimum: -180;
+                maximum: 180;
+                value <=> root.roll;
+            }
+
+            Control {
+                label: "pitch";
+                unit: "°";
+                minimum: -180;
+                maximum: 180;
+                value <=> root.pitch;
+            }
+
+            Control {
+                label: "altitude";
+                unit: "ft";
+                minimum: -1000;
+                maximum: 30000;
+                value <=> root.altitude;
+            }
+
+            Control {
+                label: "airspeed";
+                unit: "kt";
+                minimum: 0;
+                maximum: 240;
+                value <=> root.airspeed;
+            }
+
+            Control {
+                label: "heading";
+                unit: "°";
+                minimum: 0;
+                maximum: 360;
+                value <=> root.heading;
+            }
+
+            Control {
+                label: "vertical speed";
+                unit: "ft/min";
+                minimum: -2500;
+                maximum: 2500;
+                value <=> root.vertical_speed;
+            }
+        }
+    }
+}

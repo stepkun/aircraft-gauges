@@ -1,0 +1,5 @@
+{
+  "slint.libraryPaths": {
+    "aircraft-gauges": "../aircraft-gauges/ui"
+  }
+}

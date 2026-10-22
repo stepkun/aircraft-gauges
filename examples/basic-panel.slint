@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Test program of the library: every instrument, every value adjustable
 
-import { Slider, Switch, ScrollView } from "std-widgets.slint";
+import { Switch, ScrollView } from "std-widgets.slint";
+import { Control } from "controls.slint";
 import {
     Attitude,
     Altimeter,
@@ -14,41 +15,7 @@ import {
 } from "@aircraft-gauges/lib.slint";
 import "@aircraft-gauges/fonts/NotoSans-Regular.ttf";
 
-// one value: name, slider and the value with its unit
-component Control inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> unit;
-    in property <float> minimum;
-    in property <float> maximum;
-    // digits after the decimal point of the shown value
-    in property <int> digits: 0;
-    in-out property <float> value;
-
-    spacing: 8px;
-    Text {
-        text: root.label;
-        min-width: 110px;
-        vertical-alignment: center;
-        color: Theme.marking;
-    }
-
-    Slider {
-        minimum: root.minimum;
-        maximum: root.maximum;
-        value <=> root.value;
-        min-width: 160px;
-    }
-
-    Text {
-        text: root.digits == 0 ? "\{round(root.value)} \{root.unit}" : "\{round(root.value * 100) / 100} \{root.unit}";
-        min-width: 90px;
-        vertical-alignment: center;
-        horizontal-alignment: right;
-        color: Theme.marking;
-    }
-}
-
-export component Gallery inherits Window {
+export component BasicPanel inherits Window {
     // the instrument values, in the units of the instrument properties
     property <float> roll: 0;
     property <float> pitch: 0;
@@ -63,7 +30,7 @@ export component Gallery inherits Window {
     property <bool> animate: false;
     property <float> time: 0;
 
-    title: "aircraft-gauges";
+    title: "aircraft-gauges: basic panel";
     default-font-family: "Noto Sans";
     background: Theme.background;
     preferred-width: 1300px;
@@ -168,16 +135,16 @@ export component Gallery inherits Window {
             Control {
                 label: "roll";
                 unit: "°";
-                minimum: -90;
-                maximum: 90;
+                minimum: -180;
+                maximum: 180;
                 value <=> root.roll;
             }
 
             Control {
                 label: "pitch";
                 unit: "°";
-                minimum: -40;
-                maximum: 40;
+                minimum: -180;
+                maximum: 180;
                 value <=> root.pitch;
             }
 

@@ -16,6 +16,9 @@ export component Attitude inherits Rectangle {
     // widths and font sizes are those of Theme at Theme.reference_size, scaled with the size of
     // the instrument, so it keeps its proportions on the desktop; exactly 1 on the device
     private property <float> scale: size / Theme.reference_size;
+    // font size on whole pixels: the device has glyphs of the sizes in Theme only, and a
+    // fraction below them would fall back to the next smaller size
+    private property <length> font_size: round(Theme.small_font_size * scale / 1px) * 1px;
 
     // inner part, all values in viewbox units
     // the geometry is calculated instead of using transform-rotation,
@@ -24,14 +27,23 @@ export component Attitude inherits Rectangle {
     private property <float> inner_radius: center - outer_thickness / 1px;
     // distance per degree of pitch, 25 degree reach the inner edge
     private property <float> pitch_scale: inner_radius / 25;
+    // Any roll and pitch, also beyond a full turn: the pitch from -180 to 180 degree (with floor,
+    // mod becomes an f64 rem_euclid, slow on the RP2040). Beyond the vertical (more than 90 degree
+    // up or down, in a loop) the aircraft is on its back: the same attitude as the pitch mirrored
+    // at the vertical with the roll turned by 180 degree. At the vertical both show only sky (or
+    // ground), so the picture doesn't jump.
+    private property <float> pitch_any: root.pitch / 1deg - floor((root.pitch / 1deg + 180) / 360) * 360;
+    private property <bool> inverted: abs(pitch_any) > 90;
+    private property <float> pitch_deg: !inverted ? pitch_any : pitch_any > 0 ? 180 - pitch_any : -180 - pitch_any;
+    private property <angle> bank: inverted ? root.roll + 180deg : root.roll;
     // direction along the horizon (u) and perpendicular downwards (n)
     // The functions keep the compiler from inlining sin/cos into every place that uses these
     // properties: inlined, they are evaluated again for each coordinate, in f64, which is very
     // slow on the RP2040. As properties they are calculated once per change of the roll.
-    private property <float> ux: cos_of(root.roll);
-    private property <float> uy: -sin_of(root.roll);
-    private property <float> nx: sin_of(root.roll);
-    private property <float> ny: cos_of(root.roll);
+    private property <float> ux: cos_of(bank);
+    private property <float> uy: -sin_of(bank);
+    private property <float> nx: sin_of(bank);
+    private property <float> ny: cos_of(bank);
     pure function sin_of(a: angle) -> float {
         return sin(a);
     }
@@ -39,15 +51,78 @@ export component Attitude inherits Rectangle {
         return cos(a);
     }
     // distance of the horizon from the center, positive is below the center
-    private property <float> pitch_offset: root.pitch / 1deg * pitch_scale;
-    // kept slightly inside the circle, so there is always some sky and ground
-    private property <float> horizon_offset: max(-0.98 * inner_radius, min(0.98 * inner_radius, pitch_offset));
-    private property <float> half_chord: sqrt(inner_radius * inner_radius - horizon_offset * horizon_offset);
+    private property <float> pitch_offset: pitch_deg * pitch_scale;
+    // for the ground on the inner circle at most: beyond it (more than 25 degree of pitch) the
+    // inner part is only sky or only ground
+    private property <float> horizon_offset: max(-inner_radius, min(inner_radius, pitch_offset));
+    private property <float> half_chord: sqrt_of(max(0, inner_radius * inner_radius - horizon_offset * horizon_offset));
     // horizon end points on the inner circle
     private property <float> left_x: center + horizon_offset * nx - half_chord * ux;
     private property <float> left_y: center + horizon_offset * ny - half_chord * uy;
     private property <float> right_x: center + horizon_offset * nx + half_chord * ux;
     private property <float> right_y: center + horizon_offset * ny + half_chord * uy;
+    // The horizon line is a filled band with its corners on the inner circle, half chords of its
+    // upper and lower edge. As a stroke, Slint fits the viewbox into the box less the stroke
+    // width: the line was shorter than the ground, which showed at its ends (more on a larger
+    // instrument); and a stroke reaching the circle would stick out with a corner at a steep
+    // pitch. From the pitch itself, not horizon_offset: outside the circle all corners are the
+    // same point, so it isn't drawn (as a line without area, femtovg would still draw its
+    // anti-aliased edge, also outside its box).
+    private property <float> horizon_half_width: Theme.marking_width * scale / 2px;
+    private property <bool> horizon_inside: abs(pitch_offset) < inner_radius + horizon_half_width;
+    // the edges on the circle at most: a corner beyond it would stick out of the inner part in
+    // femtovg, where the box doesn't cut it off
+    private property <float> above_offset: horizon_inside ? max(-inner_radius, pitch_offset - horizon_half_width) : pitch_offset;
+    private property <float> below_offset: horizon_inside ? min(inner_radius, pitch_offset + horizon_half_width) : pitch_offset;
+    // (sqrt_of: calculated once per change, like sin_of)
+    private property <float> half_chord_above: sqrt_of(max(0, inner_radius * inner_radius - above_offset * above_offset));
+    private property <float> half_chord_below: sqrt_of(max(0, inner_radius * inner_radius - below_offset * below_offset));
+    pure function sqrt_of(v: float) -> float {
+        return sqrt(v);
+    }
+    // Pitch ladder: slots at the multiples of 5 degree around the pitch, like the tapes of the
+    // combined display; the offset of the line at ladder_base5 from the center (the others 5
+    // degree apart) and the half length of each line, 0 while it isn't shown: once per change of
+    // the pitch, so a coordinate reads few properties (each read costs a dependency node of heap).
+    private property <float> ladder_base5: floor(pitch_deg / 5) * 5;
+    private property <float> ladder_offset: pitch_offset - ladder_base5 * pitch_scale;
+    private property <float> ladder_half_m4: ladder_half(ladder_base5 - 20);
+    private property <float> ladder_half_m3: ladder_half(ladder_base5 - 15);
+    private property <float> ladder_half_m2: ladder_half(ladder_base5 - 10);
+    private property <float> ladder_half_m1: ladder_half(ladder_base5 - 5);
+    private property <float> ladder_half_0: ladder_half(ladder_base5);
+    private property <float> ladder_half_1: ladder_half(ladder_base5 + 5);
+    private property <float> ladder_half_2: ladder_half(ladder_base5 + 10);
+    private property <float> ladder_half_3: ladder_half(ladder_base5 + 15);
+    private property <float> ladder_half_4: ladder_half(ladder_base5 + 20);
+    private property <float> ladder_half_5: ladder_half(ladder_base5 + 25);
+    // half the length of the ladder line at `value` degree: extra long (0.30 of the inner
+    // radius) every 20 degree, long (0.20) every 10, short (0.10) in between; none at 0 (the
+    // horizon) and beyond 90, and only while it is completely inside 0.95 of the inner radius:
+    // offset² + (length · r)² < 0.9 r² with offset = r / 25 · (pitch - value) is the same as
+    // |pitch - value| < 25 · sqrt(0.9 - length²), i.e. 22.5 (extra long), 23.184 (long) and
+    // 23.585 degree (short)
+    // Numbers of the pitch ladder at both ends of the lines every 10 degree, upright: slots at
+    // the multiples of 10 around the pitch, the offset of the one at ladder_base10 (the others 10
+    // degree apart) and the distance of each from the middle of its line, 16 units beyond the
+    // end of the line (extra long every 20 degree). Only less than 17.5 degree from the pitch:
+    // the glyphs reach about 12 units beyond the center of a number, which keeps them inside the
+    // inner part up to 18 degree (19.4 for the shorter lines), at any roll.
+    private property <float> ladder_base10: floor(pitch_deg / 10) * 10;
+    private property <float> ladder_offset10: pitch_offset - ladder_base10 * pitch_scale;
+    private property <float> number_along_m1: number_along(ladder_base10 - 10);
+    private property <float> number_along_0: number_along(ladder_base10);
+    private property <float> number_along_1: number_along(ladder_base10 + 10);
+    private property <float> number_along_2: number_along(ladder_base10 + 20);
+    pure function number_along(value: float) -> float {
+        return (value - floor(value / 20) * 20 == 0 ? 0.30 : 0.20) * inner_radius + 16 * scale;
+    }
+    pure function ladder_half(value: float) -> float {
+        return value == 0 || abs(value) > 90 ? 0
+            : value - floor(value / 20) * 20 == 0 ? (abs(pitch_deg - value) < 22.5 ? 0.30 * inner_radius : 0)
+            : value - floor(value / 10) * 10 == 0 ? (abs(pitch_deg - value) < 23.184 ? 0.20 * inner_radius : 0)
+            : abs(pitch_deg - value) < 23.585 ? 0.10 * inner_radius : 0;
+    }
 
     // On MCUs every Path needs a temporary buffer of one byte per pixel of its box,
     // so the paths are combined where possible and their boxes are kept small.
@@ -56,12 +131,6 @@ export component Attitude inherits Rectangle {
     // command strings: formatting and parsing the numbers of a string is slow on the RP2040.
     // (Path elements can't be created with `for` yet, so they are written out.)
 
-    // Pitch ladder: lines every 5 degree from -30 to 30, extra long (0.30 of the inner radius)
-    // every 20 degree, long (0.20) every 10 degree, short (0.10) in between. A line is drawn
-    // only while it is completely inside 0.95 of the inner radius:
-    // offset² + (length · r)² < 0.9 r² with offset = r / 25 · (pitch - step) is the same as
-    // |pitch - step| < 25 · sqrt(0.9 - length²), i.e. 23.585 (short), 23.184 (long) and
-    // 22.5 degree (extra long); otherwise both ends are the same point and nothing is drawn.
     // The coordinates are written out instead of calling functions: in a function every call
     // reads the properties again, and each read costs a dependency node of heap.
 
@@ -74,26 +143,17 @@ export component Attitude inherits Rectangle {
         width: root.size;
         height: root.size;
 
-        // upper half outer ring: a circle border, clipped to the upper half
+        // sky: a full disc, the upper half of the outer ring and the sky of the inner part
+        // One disc instead of a ring half and an inner disc: the square around the inner part is
+        // redrawn every frame with the moving parts, and each round Rectangle in it costs about
+        // 5 ms per frame on the RP2040.
         Rectangle {
             x: 0px;
             y: 0px;
             width: size;
-            height: size / 2;
-            clip: true;
-
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: size;
-                height: size;
-                border-radius: size / 2;
-                // 2px wider than the ring, under the inner sky disc (which is 1px smaller than the
-                // inner circle): with anti-aliased edges at the same radius the background would show
-                // through as a thin circle
-                border-width: outer_thickness + 2px;
-                border-color: Theme.sky;
-            }
+            height: size;
+            border-radius: size / 2;
+            background: Theme.sky;
         }
 
         // lower half outer ring: a circle border, clipped to the lower half
@@ -110,15 +170,18 @@ export component Attitude inherits Rectangle {
                 width: size;
                 height: size;
                 border-radius: size / 2;
-                // 2px under the inner disc, see above
-                border-width: outer_thickness + 2px;
+                // 1px wider than the ring: its anti-aliased inner edge lies 1px inside the inner
+                // circle, under the edge of the ground path, so the sky disc doesn't show through
+                // between them as a thin circle
+                border-width: outer_thickness + 1px;
                 border-color: Theme.ground;
             }
         }
 
-        // Bank ticks, in four paths with tight boxes: the ticks are static, and a box overlapping
-        // the moving inner disc would make them be redrawn every frame. Separate Tick components
-        // would be simpler, but each instance costs several KB of heap.
+        // Bank ticks, in three paths with tight boxes: the ticks are static, but the part of a box
+        // inside the box of the moving inner disc is redrawn with it every frame, the groups keep
+        // that part small. Separate Tick components would be simpler, but each instance costs
+        // several KB of heap.
         // The ticks are thin filled quadrilaterals (the same as a stroke with butt caps), the
         // viewboxes are tight (1 unit margin), without a stroke the box is the viewbox.
         // The coordinates are `size_float * A + B` with precomputed A and B, so each binding depends
@@ -127,12 +190,12 @@ export component Attitude inherits Rectangle {
         // Theme.ring_ratio or Theme.marking_width.
 
         // BEGIN generated by tools/dial-paths.py, do not edit
-        // 0deg
+        // 0deg, -20deg, -10deg, 10deg, 20deg
         Path {
-            viewbox-x: size_float * 0.493750 - 1.0000;
+            viewbox-x: size_float * 0.326053 - 1.0000;
             viewbox-y: -1.0000;
-            viewbox-width: size_float * 0.012500 + 2.0000;
-            viewbox-height: size_float * 0.100000 + 2.0000;
+            viewbox-width: size_float * 0.347893 + 2.0000;
+            viewbox-height: size_float * 0.125192 + 2.0000;
             x: self.viewbox-x * 1px;
             y: self.viewbox-y * 1px;
             width: self.viewbox-width * 1px;
@@ -141,42 +204,29 @@ export component Attitude inherits Rectangle {
 
             MoveTo {
                 x: size_float * 0.493750;
-                y: size_float * 0.100000;
+                y: 0.0000;
             }
 
             LineTo {
                 x: size_float * 0.493750;
-                y: 0.0000;
-            }
-
-            LineTo {
-                x: size_float * 0.506250;
-                y: 0.0000;
+                y: size_float * 0.100000;
             }
 
             LineTo {
                 x: size_float * 0.506250;
                 y: size_float * 0.100000;
+            }
+
+            LineTo {
+                x: size_float * 0.506250;
+                y: 0.0000;
             }
 
             Close { }
-        }
-
-        // -20deg, -10deg, 10deg, 20deg
-        Path {
-            viewbox-x: size_float * 0.326053 - 1.0000;
-            viewbox-y: size_float * 0.007053 - 1.0000;
-            viewbox-width: size_float * 0.347893 + 2.0000;
-            viewbox-height: size_float * 0.118138 + 2.0000;
-            x: self.viewbox-x * 1px;
-            y: self.viewbox-y * 1px;
-            width: self.viewbox-width * 1px;
-            height: self.viewbox-height * 1px;
-            fill: Theme.marking;
 
             MoveTo {
-                x: size_float * 0.360255;
-                y: size_float * 0.125192;
+                x: size_float * 0.331926;
+                y: size_float * 0.029085;
             }
 
             LineTo {
@@ -185,8 +235,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.331926;
-                y: size_float * 0.029085;
+                x: size_float * 0.360255;
+                y: size_float * 0.125192;
             }
 
             LineTo {
@@ -197,8 +247,8 @@ export component Attitude inherits Rectangle {
             Close { }
 
             MoveTo {
-                x: size_float * 0.427463;
-                y: size_float * 0.106620;
+                x: size_float * 0.416253;
+                y: size_float * 0.007053;
             }
 
             LineTo {
@@ -207,8 +257,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.416253;
-                y: size_float * 0.007053;
+                x: size_float * 0.427463;
+                y: size_float * 0.106620;
             }
 
             LineTo {
@@ -224,8 +274,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.583747;
-                y: size_float * 0.007053;
+                x: size_float * 0.572537;
+                y: size_float * 0.106620;
             }
 
             LineTo {
@@ -234,8 +284,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.572537;
-                y: size_float * 0.106620;
+                x: size_float * 0.583747;
+                y: size_float * 0.007053;
             }
 
             Close { }
@@ -246,8 +296,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.668074;
-                y: size_float * 0.029085;
+                x: size_float * 0.639745;
+                y: size_float * 0.125192;
             }
 
             LineTo {
@@ -256,8 +306,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.639745;
-                y: size_float * 0.125192;
+                x: size_float * 0.668074;
+                y: size_float * 0.029085;
             }
 
             Close { }
@@ -276,8 +326,8 @@ export component Attitude inherits Rectangle {
             fill: Theme.marking;
 
             MoveTo {
-                x: size_float * 0.150465;
-                y: size_float * 0.305413;
+                x: size_float * 0.070112;
+                y: size_float * 0.244587;
             }
 
             LineTo {
@@ -286,8 +336,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.070112;
-                y: size_float * 0.244587;
+                x: size_float * 0.150465;
+                y: size_float * 0.305413;
             }
 
             LineTo {
@@ -298,8 +348,8 @@ export component Attitude inherits Rectangle {
             Close { }
 
             MoveTo {
-                x: size_float * 0.294587;
-                y: size_float * 0.156715;
+                x: size_float * 0.255413;
+                y: size_float * 0.063862;
             }
 
             LineTo {
@@ -308,8 +358,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.255413;
-                y: size_float * 0.063862;
+                x: size_float * 0.294587;
+                y: size_float * 0.156715;
             }
 
             LineTo {
@@ -338,8 +388,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.744587;
-                y: size_float * 0.063862;
+                x: size_float * 0.705413;
+                y: size_float * 0.156715;
             }
 
             LineTo {
@@ -348,8 +398,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.705413;
-                y: size_float * 0.156715;
+                x: size_float * 0.744587;
+                y: size_float * 0.063862;
             }
 
             Close { }
@@ -360,8 +410,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.929888;
-                y: size_float * 0.244587;
+                x: size_float * 0.849535;
+                y: size_float * 0.305413;
             }
 
             LineTo {
@@ -370,8 +420,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: size_float * 0.849535;
-                y: size_float * 0.305413;
+                x: size_float * 0.929888;
+                y: size_float * 0.244587;
             }
 
             Close { }
@@ -397,21 +447,11 @@ export component Attitude inherits Rectangle {
             background: Theme.marking;
         }
 
-        // inner part: sky as full disc
-        // 1px smaller than the inner circle, its edge lies on the ring: at the same radius as the
-        // ground path its anti-aliased edge would show through the edge of the ground as a thin line
-        Rectangle {
-            x: outer_thickness + 1px;
-            y: outer_thickness + 1px;
-            width: size - 2 * outer_thickness - 2px;
-            height: self.width;
-            border-radius: self.width / 2;
-            background: Theme.sky;
-        }
-
         // inner part: ground below the horizon
-        // from the right end of the horizon clockwise around the bottom to the left end
-        // the arc is the larger one, when the horizon is above the center
+        // from the left end of the horizon counterclockwise around the bottom to the right end,
+        // in two arcs through the point of the circle opposite the sky: each of them at most half
+        // the circle. With the horizon at the edge the ground is the whole circle (two half
+        // circles) or nothing (all points the same).
         Path {
             x: outer_thickness;
             y: outer_thickness;
@@ -424,29 +464,42 @@ export component Attitude inherits Rectangle {
             viewbox-height: 2 * inner_radius;
             fill: Theme.ground;
 
+            // counterclockwise on the screen (see counterclockwise() in tools/dial-paths.py), the
+            // arc ends at the first point
             MoveTo {
-                x: left_x;
-                y: left_y;
-            }
-
-            LineTo {
                 x: right_x;
                 y: right_y;
             }
 
-            ArcTo {
+            LineTo {
                 x: left_x;
                 y: left_y;
+            }
+
+            ArcTo {
+                x: center + inner_radius * nx;
+                y: center + inner_radius * ny;
                 radius-x: inner_radius;
                 radius-y: inner_radius;
-                large-arc: horizon_offset < 0;
-                sweep: true;
+                sweep: false;
+            }
+
+            ArcTo {
+                x: right_x;
+                y: right_y;
+                radius-x: inner_radius;
+                radius-y: inner_radius;
+                sweep: false;
             }
 
             Close { }
         }
 
-        // inner part: horizon line
+        // inner part: horizon line, a band from the circle to the circle (see half_chord_above)
+        // Counterclockwise on the screen and back to its first point: Slint marks a clockwise
+        // outline as a hole for femtovg, which then draws its anti-aliased edge outside, 1 px
+        // thicker on each side; and the last point makes the orientation Slint calculates exact
+        // (it leaves out the closing edge).
         Path {
             x: outer_thickness;
             y: outer_thickness;
@@ -457,153 +510,258 @@ export component Attitude inherits Rectangle {
             viewbox-y: outer_thickness / 1px;
             viewbox-width: 2 * inner_radius;
             viewbox-height: 2 * inner_radius;
-            stroke: Theme.marking;
-            stroke-width: Theme.marking_width * scale;
+            fill: Theme.marking;
 
             MoveTo {
-                x: left_x;
-                y: left_y;
+                x: center + above_offset * nx - half_chord_above * ux;
+                y: center + above_offset * ny - half_chord_above * uy;
             }
 
             LineTo {
-                x: right_x;
-                y: right_y;
+                x: center + below_offset * nx - half_chord_below * ux;
+                y: center + below_offset * ny - half_chord_below * uy;
             }
+
+            LineTo {
+                x: center + below_offset * nx + half_chord_below * ux;
+                y: center + below_offset * ny + half_chord_below * uy;
+            }
+
+            LineTo {
+                x: center + above_offset * nx + half_chord_above * ux;
+                y: center + above_offset * ny + half_chord_above * uy;
+            }
+
+            LineTo {
+                x: center + above_offset * nx - half_chord_above * ux;
+                y: center + above_offset * ny - half_chord_above * uy;
+            }
+
+            Close { }
         }
 
-        // inner part: pitch ladder
+        // inner part: pitch ladder, the slots of ladder_half_m4 to ladder_half_5; an empty line
+        // has both ends at the same point
         Path {
             x: outer_thickness;
             y: outer_thickness;
             width: size - 2 * outer_thickness;
             height: self.width;
-            // box of the inner disc, coordinates stay the same as for the full size
-            viewbox-x: outer_thickness / 1px;
-            viewbox-y: outer_thickness / 1px;
-            viewbox-width: 2 * inner_radius;
-            viewbox-height: 2 * inner_radius;
+            // box of the inner disc, coordinates stay the same as for the full size: Slint fits
+            // the viewbox of a stroke into the box less the stroke width, so the viewbox is that
+            // much smaller (otherwise the ladder would be 0.8 % closer to the center)
+            viewbox-x: outer_thickness / 1px + Theme.marking_width * scale / 4px;
+            viewbox-y: outer_thickness / 1px + Theme.marking_width * scale / 4px;
+            viewbox-width: 2 * inner_radius - Theme.marking_width * scale / 2px;
+            viewbox-height: 2 * inner_radius - Theme.marking_width * scale / 2px;
             stroke: Theme.marking;
             stroke-width: Theme.marking_width * scale / 2;
 
             MoveTo {
-                x: center + (pitch_offset + 30 * pitch_scale) * nx + (abs(root.pitch / 1deg + 30) < 23.184 ? -0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 30 * pitch_scale) * ny + (abs(root.pitch / 1deg + 30) < 23.184 ? -0.20 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 20 * pitch_scale) * nx - ladder_half_m4 * ux;
+                y: center + (ladder_offset + 20 * pitch_scale) * ny - ladder_half_m4 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 30 * pitch_scale) * nx + (abs(root.pitch / 1deg + 30) < 23.184 ? 0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 30 * pitch_scale) * ny + (abs(root.pitch / 1deg + 30) < 23.184 ? 0.20 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 20 * pitch_scale) * nx + ladder_half_m4 * ux;
+                y: center + (ladder_offset + 20 * pitch_scale) * ny + ladder_half_m4 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset + 25 * pitch_scale) * nx + (abs(root.pitch / 1deg + 25) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 25 * pitch_scale) * ny + (abs(root.pitch / 1deg + 25) < 23.585 ? -0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 15 * pitch_scale) * nx - ladder_half_m3 * ux;
+                y: center + (ladder_offset + 15 * pitch_scale) * ny - ladder_half_m3 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 25 * pitch_scale) * nx + (abs(root.pitch / 1deg + 25) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 25 * pitch_scale) * ny + (abs(root.pitch / 1deg + 25) < 23.585 ? 0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 15 * pitch_scale) * nx + ladder_half_m3 * ux;
+                y: center + (ladder_offset + 15 * pitch_scale) * ny + ladder_half_m3 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset + 20 * pitch_scale) * nx + (abs(root.pitch / 1deg + 20) < 22.5 ? -0.30 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 20 * pitch_scale) * ny + (abs(root.pitch / 1deg + 20) < 22.5 ? -0.30 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 10 * pitch_scale) * nx - ladder_half_m2 * ux;
+                y: center + (ladder_offset + 10 * pitch_scale) * ny - ladder_half_m2 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 20 * pitch_scale) * nx + (abs(root.pitch / 1deg + 20) < 22.5 ? 0.30 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 20 * pitch_scale) * ny + (abs(root.pitch / 1deg + 20) < 22.5 ? 0.30 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 10 * pitch_scale) * nx + ladder_half_m2 * ux;
+                y: center + (ladder_offset + 10 * pitch_scale) * ny + ladder_half_m2 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset + 15 * pitch_scale) * nx + (abs(root.pitch / 1deg + 15) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 15 * pitch_scale) * ny + (abs(root.pitch / 1deg + 15) < 23.585 ? -0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 5 * pitch_scale) * nx - ladder_half_m1 * ux;
+                y: center + (ladder_offset + 5 * pitch_scale) * ny - ladder_half_m1 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 15 * pitch_scale) * nx + (abs(root.pitch / 1deg + 15) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 15 * pitch_scale) * ny + (abs(root.pitch / 1deg + 15) < 23.585 ? 0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset + 5 * pitch_scale) * nx + ladder_half_m1 * ux;
+                y: center + (ladder_offset + 5 * pitch_scale) * ny + ladder_half_m1 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset + 10 * pitch_scale) * nx + (abs(root.pitch / 1deg + 10) < 23.184 ? -0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 10 * pitch_scale) * ny + (abs(root.pitch / 1deg + 10) < 23.184 ? -0.20 * inner_radius : 0) * uy;
+                x: center + ladder_offset * nx - ladder_half_0 * ux;
+                y: center + ladder_offset * ny - ladder_half_0 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 10 * pitch_scale) * nx + (abs(root.pitch / 1deg + 10) < 23.184 ? 0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 10 * pitch_scale) * ny + (abs(root.pitch / 1deg + 10) < 23.184 ? 0.20 * inner_radius : 0) * uy;
+                x: center + ladder_offset * nx + ladder_half_0 * ux;
+                y: center + ladder_offset * ny + ladder_half_0 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset + 5 * pitch_scale) * nx + (abs(root.pitch / 1deg + 5) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 5 * pitch_scale) * ny + (abs(root.pitch / 1deg + 5) < 23.585 ? -0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 5 * pitch_scale) * nx - ladder_half_1 * ux;
+                y: center + (ladder_offset - 5 * pitch_scale) * ny - ladder_half_1 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset + 5 * pitch_scale) * nx + (abs(root.pitch / 1deg + 5) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset + 5 * pitch_scale) * ny + (abs(root.pitch / 1deg + 5) < 23.585 ? 0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 5 * pitch_scale) * nx + ladder_half_1 * ux;
+                y: center + (ladder_offset - 5 * pitch_scale) * ny + ladder_half_1 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset - 5 * pitch_scale) * nx + (abs(root.pitch / 1deg - 5) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 5 * pitch_scale) * ny + (abs(root.pitch / 1deg - 5) < 23.585 ? -0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 10 * pitch_scale) * nx - ladder_half_2 * ux;
+                y: center + (ladder_offset - 10 * pitch_scale) * ny - ladder_half_2 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset - 5 * pitch_scale) * nx + (abs(root.pitch / 1deg - 5) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 5 * pitch_scale) * ny + (abs(root.pitch / 1deg - 5) < 23.585 ? 0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 10 * pitch_scale) * nx + ladder_half_2 * ux;
+                y: center + (ladder_offset - 10 * pitch_scale) * ny + ladder_half_2 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset - 10 * pitch_scale) * nx + (abs(root.pitch / 1deg - 10) < 23.184 ? -0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 10 * pitch_scale) * ny + (abs(root.pitch / 1deg - 10) < 23.184 ? -0.20 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 15 * pitch_scale) * nx - ladder_half_3 * ux;
+                y: center + (ladder_offset - 15 * pitch_scale) * ny - ladder_half_3 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset - 10 * pitch_scale) * nx + (abs(root.pitch / 1deg - 10) < 23.184 ? 0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 10 * pitch_scale) * ny + (abs(root.pitch / 1deg - 10) < 23.184 ? 0.20 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 15 * pitch_scale) * nx + ladder_half_3 * ux;
+                y: center + (ladder_offset - 15 * pitch_scale) * ny + ladder_half_3 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset - 15 * pitch_scale) * nx + (abs(root.pitch / 1deg - 15) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 15 * pitch_scale) * ny + (abs(root.pitch / 1deg - 15) < 23.585 ? -0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 20 * pitch_scale) * nx - ladder_half_4 * ux;
+                y: center + (ladder_offset - 20 * pitch_scale) * ny - ladder_half_4 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset - 15 * pitch_scale) * nx + (abs(root.pitch / 1deg - 15) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 15 * pitch_scale) * ny + (abs(root.pitch / 1deg - 15) < 23.585 ? 0.10 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 20 * pitch_scale) * nx + ladder_half_4 * ux;
+                y: center + (ladder_offset - 20 * pitch_scale) * ny + ladder_half_4 * uy;
             }
 
             MoveTo {
-                x: center + (pitch_offset - 20 * pitch_scale) * nx + (abs(root.pitch / 1deg - 20) < 22.5 ? -0.30 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 20 * pitch_scale) * ny + (abs(root.pitch / 1deg - 20) < 22.5 ? -0.30 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 25 * pitch_scale) * nx - ladder_half_5 * ux;
+                y: center + (ladder_offset - 25 * pitch_scale) * ny - ladder_half_5 * uy;
             }
 
             LineTo {
-                x: center + (pitch_offset - 20 * pitch_scale) * nx + (abs(root.pitch / 1deg - 20) < 22.5 ? 0.30 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 20 * pitch_scale) * ny + (abs(root.pitch / 1deg - 20) < 22.5 ? 0.30 * inner_radius : 0) * uy;
+                x: center + (ladder_offset - 25 * pitch_scale) * nx + ladder_half_5 * ux;
+                y: center + (ladder_offset - 25 * pitch_scale) * ny + ladder_half_5 * uy;
             }
+        }
 
-            MoveTo {
-                x: center + (pitch_offset - 25 * pitch_scale) * nx + (abs(root.pitch / 1deg - 25) < 23.585 ? -0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 25 * pitch_scale) * ny + (abs(root.pitch / 1deg - 25) < 23.585 ? -0.10 * inner_radius : 0) * uy;
-            }
+        // numbers of the pitch ladder (see ladder_base10), before the vehicle symbol, which stays
+        // on top
+        Text {
+            x: (center + (ladder_offset10 + 10 * pitch_scale) * nx - number_along_m1 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 + 10 * pitch_scale) * ny - number_along_m1 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 - 10) <= 90 && (ladder_base10 - 10) != 0 && abs(pitch_deg - (ladder_base10 - 10)) < 17.5;
+            text: "\{(ladder_base10 - 10)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
 
-            LineTo {
-                x: center + (pitch_offset - 25 * pitch_scale) * nx + (abs(root.pitch / 1deg - 25) < 23.585 ? 0.10 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 25 * pitch_scale) * ny + (abs(root.pitch / 1deg - 25) < 23.585 ? 0.10 * inner_radius : 0) * uy;
-            }
+        Text {
+            x: (center + (ladder_offset10 + 10 * pitch_scale) * nx + number_along_m1 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 + 10 * pitch_scale) * ny + number_along_m1 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 - 10) <= 90 && (ladder_base10 - 10) != 0 && abs(pitch_deg - (ladder_base10 - 10)) < 17.5;
+            text: "\{(ladder_base10 - 10)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
 
-            MoveTo {
-                x: center + (pitch_offset - 30 * pitch_scale) * nx + (abs(root.pitch / 1deg - 30) < 23.184 ? -0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 30 * pitch_scale) * ny + (abs(root.pitch / 1deg - 30) < 23.184 ? -0.20 * inner_radius : 0) * uy;
-            }
+        Text {
+            x: (center + ladder_offset10 * nx - number_along_0 * ux - 12 * scale) * 1px;
+            y: (center + ladder_offset10 * ny - number_along_0 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10) <= 90 && ladder_base10 != 0 && abs(pitch_deg - ladder_base10) < 17.5;
+            text: "\{ladder_base10}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
 
-            LineTo {
-                x: center + (pitch_offset - 30 * pitch_scale) * nx + (abs(root.pitch / 1deg - 30) < 23.184 ? 0.20 * inner_radius : 0) * ux;
-                y: center + (pitch_offset - 30 * pitch_scale) * ny + (abs(root.pitch / 1deg - 30) < 23.184 ? 0.20 * inner_radius : 0) * uy;
-            }
+        Text {
+            x: (center + ladder_offset10 * nx + number_along_0 * ux - 12 * scale) * 1px;
+            y: (center + ladder_offset10 * ny + number_along_0 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10) <= 90 && ladder_base10 != 0 && abs(pitch_deg - ladder_base10) < 17.5;
+            text: "\{ladder_base10}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (center + (ladder_offset10 - 10 * pitch_scale) * nx - number_along_1 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 - 10 * pitch_scale) * ny - number_along_1 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 + 10) <= 90 && (ladder_base10 + 10) != 0 && abs(pitch_deg - (ladder_base10 + 10)) < 17.5;
+            text: "\{(ladder_base10 + 10)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (center + (ladder_offset10 - 10 * pitch_scale) * nx + number_along_1 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 - 10 * pitch_scale) * ny + number_along_1 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 + 10) <= 90 && (ladder_base10 + 10) != 0 && abs(pitch_deg - (ladder_base10 + 10)) < 17.5;
+            text: "\{(ladder_base10 + 10)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (center + (ladder_offset10 - 20 * pitch_scale) * nx - number_along_2 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 - 20 * pitch_scale) * ny - number_along_2 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 + 20) <= 90 && (ladder_base10 + 20) != 0 && abs(pitch_deg - (ladder_base10 + 20)) < 17.5;
+            text: "\{(ladder_base10 + 20)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (center + (ladder_offset10 - 20 * pitch_scale) * nx + number_along_2 * ux - 12 * scale) * 1px;
+            y: (center + (ladder_offset10 - 20 * pitch_scale) * ny + number_along_2 * uy - 8 * scale) * 1px;
+            width: 24px * scale;
+            height: 16px * scale;
+            visible: abs(ladder_base10 + 20) <= 90 && (ladder_base10 + 20) != 0 && abs(pitch_deg - (ladder_base10 + 20)) < 17.5;
+            text: "\{(ladder_base10 + 20)}";
+            color: Theme.marking;
+            font-size: font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
         }
 
         // bank pointer: triangle just inside the ring pointing at the bank scale
@@ -626,9 +784,15 @@ export component Attitude inherits Rectangle {
             private property <float> half_base: outer_thickness / 3 / 1px;
 
             // "up" rotated by -roll is -n, the base runs along u
+            // counterclockwise on the screen and closed, see counterclockwise() in tools/dial-paths.py
             MoveTo {
                 x: center - tip * nx;
                 y: center - tip * ny;
+            }
+
+            LineTo {
+                x: center - base * nx - half_base * ux;
+                y: center - base * ny - half_base * uy;
             }
 
             LineTo {
@@ -637,8 +801,8 @@ export component Attitude inherits Rectangle {
             }
 
             LineTo {
-                x: center - base * nx - half_base * ux;
-                y: center - base * ny - half_base * uy;
+                x: center - tip * nx;
+                y: center - tip * ny;
             }
 
             Close { }
@@ -646,6 +810,8 @@ export component Attitude inherits Rectangle {
 
         // vehicle symbol: two horizontal lines with downward pointing inner ends
         // drawn last so it stays on top of everything else
+        // Flat ends and square corners (the defaults): zeno builds round ends and joins from arcs,
+        // which costs several ms per frame on the RP2040, the symbol is redrawn with the inner disc.
         Path {
             x: size * 0.2;
             y: size * 0.48;
@@ -658,8 +824,6 @@ export component Attitude inherits Rectangle {
             viewbox-height: size_float * 0.1;
             stroke: Theme.marker;
             stroke-width: Theme.vehicle_width * scale;
-            stroke-line-cap: round;
-            stroke-line-join: round;
 
             // left wing
             MoveTo {

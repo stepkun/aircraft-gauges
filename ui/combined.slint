@@ -1,0 +1,2143 @@
+// Copyright © 2026 Stephan Kunz
+// SPDX-License-Identifier: GPL-3.0-only
+// A combined display: the attitude in the middle, the vertical speed and the altitude on tapes
+// at the sides, the heading on a tape at the top, the airspeed and the heading as numbers.
+// It needs a rectangular 4:3 display (on a round one its corners are cut off) and about 85 KB
+// of heap (the other instruments up to 58 KB): not for the round displays and the RP2040
+// (92 KB) of slint-demos, for the RP2350 ResTouch-LCD-2.8 in landscape and the desktop.
+
+import { Theme } from "theme.slint";
+
+export component Combined inherits Rectangle {
+    // bank angle, positive is a right bank
+    in property <angle> roll: 0deg;
+    // pitch angle, positive is nose up
+    in property <angle> pitch: 0deg;
+    // indicated airspeed in knots
+    in property <float> airspeed: 0;
+    // altitude in feet
+    in property <float> altitude: 0;
+    // vertical speed in feet per minute, positive is climbing
+    in property <float> vertical_speed: 0;
+    // magnetic heading, 0deg is north
+    in property <angle> heading: 0deg;
+
+    // 320 x 240 at the reference size (a display of the device in landscape), as large as the
+    // area allows. The layout is in px at that size: `u` is one of them as a length, `scale` in
+    // viewbox units (px of the instrument); on the device both are 1 px, the parts lie on whole
+    // pixels. Heading tape y 0..28 at the top, below it the vertical speed tape x 0..40, the
+    // attitude 40..268 and the altitude tape 268..320. Each is a region of its own, so a value
+    // redraws only its part: the tapes are opaque instead of lying over the attitude (as on a
+    // large display), which would then be redrawn under them with every change.
+    private property <float> scale: min(self.width / (Theme.reference_size * 4 / 3),
+        self.height / Theme.reference_size);
+    private property <length> u: 1px * scale;
+    // font size on whole pixels: the device has glyphs of the sizes in Theme only
+    private property <length> small_font_size: round(Theme.small_font_size * scale / 1px) * 1px;
+
+    // attitude: its center (the aircraft symbol) and 4 units per degree of pitch
+    private property <float> cx: 154 * scale;
+    private property <float> cy: 134 * scale;
+    private property <float> pitch_scale: 4 * scale;
+    // Any roll and pitch, also beyond a full turn: the pitch from -180 to 180 degree (with floor,
+    // mod becomes an f64 rem_euclid, slow on microcontrollers). Beyond the vertical (more than 90
+    // degree up or down, in a loop) the aircraft is on its back: the same attitude as the pitch
+    // mirrored at the vertical with the roll turned by 180 degree. At the vertical both show only
+    // sky (or ground), so the picture doesn't jump.
+    private property <float> pitch_any: root.pitch / 1deg - floor((root.pitch / 1deg + 180) / 360) * 360;
+    private property <bool> inverted: abs(pitch_any) > 90;
+    private property <float> pitch_deg: !inverted ? pitch_any : pitch_any > 0 ? 180 - pitch_any : -180 - pitch_any;
+    private property <angle> bank: inverted ? root.roll + 180deg : root.roll;
+    // direction along the horizon (u) and perpendicular downwards (n)
+    // The functions keep the compiler from inlining sin/cos into every place that uses these
+    // properties: inlined, they are evaluated again for each coordinate, in f64, which is very
+    // slow on the RP2040. As properties they are calculated once per change of the roll.
+    private property <float> ux: cos_of(bank);
+    private property <float> uy: -sin_of(bank);
+    private property <float> nx: sin_of(bank);
+    private property <float> ny: cos_of(bank);
+    pure function sin_of(a: angle) -> float {
+        return sin(a);
+    }
+    pure function cos_of(a: angle) -> float {
+        return cos(a);
+    }
+    // distance of the horizon from the center, positive is below the center
+    private property <float> pitch_offset: pitch_deg * pitch_scale;
+    // the pitch ladder: slots at the multiples of 5 and 10 degree around the pitch, like the tapes
+    private property <float> ladder_base5: floor(pitch_deg / 5) * 5;
+    private property <float> ladder_base10: floor(pitch_deg / 10) * 10;
+    // whether the line at ladder_base5 is a long one
+    private property <bool> ladder_long: ladder_base10 == ladder_base5;
+    // The offset of the line at ladder_base5 from the center (the others 20 units apart, 5
+    // degree), and the half length of each line, 0 while it isn't shown: once per change of the
+    // pitch, so a coordinate reads few properties (each read costs a dependency node of heap).
+    private property <float> ladder_offset: pitch_offset - ladder_base5 * pitch_scale;
+    // the same for the numbers at the multiples of 10, 40 units apart
+    private property <float> ladder_offset10: pitch_offset - ladder_base10 * pitch_scale;
+    private property <float> ladder_half_m3: ladder_half(ladder_base5 - 15, !ladder_long);
+    private property <float> ladder_half_m2: ladder_half(ladder_base5 - 10, ladder_long);
+    private property <float> ladder_half_m1: ladder_half(ladder_base5 - 5, !ladder_long);
+    private property <float> ladder_half_0: ladder_half(ladder_base5, ladder_long);
+    private property <float> ladder_half_1: ladder_half(ladder_base5 + 5, !ladder_long);
+    private property <float> ladder_half_2: ladder_half(ladder_base5 + 10, ladder_long);
+    private property <float> ladder_half_3: ladder_half(ladder_base5 + 15, !ladder_long);
+    private property <float> ladder_half_4: ladder_half(ladder_base5 + 20, ladder_long);
+    // half the length of the ladder line at `value` degree: none at 0 (the horizon), beyond 90
+    // and 17.5 or more degree from the pitch (inside the bank scale)
+    pure function ladder_half(value: float, long: bool) -> float {
+        return abs(value) <= 90 && value != 0 && abs(pitch_deg - value) < 17.5
+            ? (long ? 30 : 15) * scale : 0;
+    }
+    // the middle of the horizon
+    private property <float> hx: cx + pitch_offset * nx;
+    private property <float> hy: cy + pitch_offset * ny;
+    // half the length of the ground and of the horizon line: beyond the attitude at any roll and
+    // pitch (the horizon up to 360 units from the center), the clip of the sky cuts them off
+    private property <float> far: 700 * scale;
+    // the horizon line two thirds of the width of the markings
+    private property <float> horizon_half_width: Theme.marking_width * scale / 3px;
+
+    // The tapes: 0.1 units per fpm and per foot, the value in the middle (106 below their top);
+    // a tick every 100, long ones with a number every 500. Ticks and numbers are slots at the multiples around the value,
+    // they move with it (written out, `for` would create a component per slot).
+    private property <float> vs_base100: floor(root.vertical_speed / 100) * 100;
+    private property <float> vs_offset100: (root.vertical_speed - vs_base100) * 0.1 * scale;
+    private property <float> vs_base500: floor(root.vertical_speed / 500) * 500;
+    private property <float> vs_offset500: (root.vertical_speed - vs_base500) * 0.1 * scale;
+    private property <float> alt_base100: floor(root.altitude / 100) * 100;
+    private property <float> alt_offset100: (root.altitude - alt_base100) * 0.1 * scale;
+    private property <float> alt_base500: floor(root.altitude / 500) * 500;
+    private property <float> alt_offset500: (root.altitude - alt_base500) * 0.1 * scale;
+
+    // heading tape: 3 units per degree, the heading at x 154 (below the aircraft symbol); a
+    // tick every 5 degree, long ones with a name every 15, orange ones at N, E, S and W
+    private property <float> hdg_deg: root.heading / 1deg;
+    private property <float> hdg_base5: floor(hdg_deg / 5) * 5;
+    private property <float> hdg_offset5: (hdg_deg - hdg_base5) * 3 * scale;
+    private property <float> hdg_base15: floor(hdg_deg / 15) * 15;
+    private property <float> hdg_offset15: (hdg_deg - hdg_base15) * 3 * scale;
+    private property <float> hdg_base90: floor(hdg_deg / 90) * 90;
+    private property <float> hdg_offset90: (hdg_deg - hdg_base90) * 3 * scale;
+    // the heading in whole degrees from 0 to 359
+    private property <int> hdg_shown: mod(round(hdg_deg), 360);
+    // the name of a multiple of 15 degree: N, NE, E, ... or the degrees
+    pure function heading_name(value: float) -> string {
+        return heading_label(value - floor(value / 360) * 360);
+    }
+    pure function heading_label(d: float) -> string {
+        return d == 0 ? "N" : d == 45 ? "NE" : d == 90 ? "E" : d == 135 ? "SE"
+            : d == 180 ? "S" : d == 225 ? "SW" : d == 270 ? "W" : d == 315 ? "NW" : "\{d}";
+    }
+
+    // the speeds of the arcs of the airspeed indicator (tools/dial-paths.py), a Cessna 172: the
+    // airspeed in yellow above the green arc, in red above the red line
+    private property <float> v_no: 129;
+    private property <float> v_ne: 163;
+
+    background: transparent;    // show background of parent
+
+    // all parts in a rectangle of 320 x 240 units, centered in the area the instrument is given
+    Rectangle {
+        x: (root.width - 320 * u) / 2;
+        y: (root.height - 240 * u) / 2;
+        width: 320 * u;
+        height: 240 * u;
+
+        // ---- attitude: sky, ground, horizon, pitch ladder, bank scale and pointer, aircraft
+
+        // sky, and the clip of ground and horizon line: they are large, beyond the attitude.
+        // The software renderer draws a path only inside its box, femtovg all of it.
+        Rectangle {
+            x: 40 * u;
+            y: 28 * u;
+            width: 228 * u;
+            height: 212 * u;
+            background: Theme.sky;
+            clip: true;
+
+            // ground and horizon line: two large rectangles, the clip cuts them off; the first in
+            // the color of the line from half its width above the horizon, the ground over it from
+            // half its width below, so the line remains between them. A band of the line itself has
+            // two long edges across the attitude, which need about 512 rasterizer cells in a band
+            // of the mask, at some angles more, and the cells then grow to a 16 KB block (seen with
+            // a 2 px line); these have one each. Counterclockwise on the screen and closed (see
+            // counterclockwise() in tools/dial-paths.py).
+            Path {
+                width: 228 * u;
+                height: 212 * u;
+                viewbox-x: 40 * scale;
+                viewbox-y: 28 * scale;
+                viewbox-width: 228 * scale;
+                viewbox-height: 212 * scale;
+                fill: Theme.marking;
+
+                MoveTo {
+                    x: hx - far * ux - horizon_half_width * nx;
+                    y: hy - far * uy - horizon_half_width * ny;
+                }
+
+                LineTo {
+                    x: hx - far * ux + far * nx;
+                    y: hy - far * uy + far * ny;
+                }
+
+                LineTo {
+                    x: hx + far * ux + far * nx;
+                    y: hy + far * uy + far * ny;
+                }
+
+                LineTo {
+                    x: hx + far * ux - horizon_half_width * nx;
+                    y: hy + far * uy - horizon_half_width * ny;
+                }
+
+                LineTo {
+                    x: hx - far * ux - horizon_half_width * nx;
+                    y: hy - far * uy - horizon_half_width * ny;
+                }
+
+                Close { }
+            }
+
+            Path {
+                width: 228 * u;
+                height: 212 * u;
+                viewbox-x: 40 * scale;
+                viewbox-y: 28 * scale;
+                viewbox-width: 228 * scale;
+                viewbox-height: 212 * scale;
+                fill: Theme.ground;
+
+                MoveTo {
+                    x: hx - far * ux + horizon_half_width * nx;
+                    y: hy - far * uy + horizon_half_width * ny;
+                }
+
+                LineTo {
+                    x: hx - far * ux + far * nx;
+                    y: hy - far * uy + far * ny;
+                }
+
+                LineTo {
+                    x: hx + far * ux + far * nx;
+                    y: hy + far * uy + far * ny;
+                }
+
+                LineTo {
+                    x: hx + far * ux + horizon_half_width * nx;
+                    y: hy + far * uy + horizon_half_width * ny;
+                }
+
+                LineTo {
+                    x: hx - far * ux + horizon_half_width * nx;
+                    y: hy - far * uy + horizon_half_width * ny;
+                }
+
+                Close { }
+            }
+        }
+
+        // pitch ladder: lines every 5 degree up to 90, long ones every 10, while they are less
+        // than 17.5 degree from the pitch (inside the bank scale), otherwise both ends are the same
+        // point; slots at the multiples of 5 around the pitch, they move with it
+        Path {
+            x: 40 * u;
+            y: 28 * u;
+            width: 228 * u;
+            height: 212 * u;
+            // Slint fits the viewbox of a stroke into the box less the stroke width: the viewbox is
+            // that much smaller, so the coordinates stay those of the instrument
+            viewbox-x: 40 * scale + Theme.marking_width * scale / 4px;
+            viewbox-y: 28 * scale + Theme.marking_width * scale / 4px;
+            viewbox-width: 228 * scale - Theme.marking_width * scale / 2px;
+            viewbox-height: 212 * scale - Theme.marking_width * scale / 2px;
+            stroke: Theme.marking;
+            stroke-width: Theme.marking_width * scale / 2;
+
+            MoveTo {
+                x: cx + (ladder_offset + 60 * scale) * nx - ladder_half_m3 * ux;
+                y: cy + (ladder_offset + 60 * scale) * ny - ladder_half_m3 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset + 60 * scale) * nx + ladder_half_m3 * ux;
+                y: cy + (ladder_offset + 60 * scale) * ny + ladder_half_m3 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset + 40 * scale) * nx - ladder_half_m2 * ux;
+                y: cy + (ladder_offset + 40 * scale) * ny - ladder_half_m2 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset + 40 * scale) * nx + ladder_half_m2 * ux;
+                y: cy + (ladder_offset + 40 * scale) * ny + ladder_half_m2 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset + 20 * scale) * nx - ladder_half_m1 * ux;
+                y: cy + (ladder_offset + 20 * scale) * ny - ladder_half_m1 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset + 20 * scale) * nx + ladder_half_m1 * ux;
+                y: cy + (ladder_offset + 20 * scale) * ny + ladder_half_m1 * uy;
+            }
+
+            MoveTo {
+                x: cx + ladder_offset * nx - ladder_half_0 * ux;
+                y: cy + ladder_offset * ny - ladder_half_0 * uy;
+            }
+
+            LineTo {
+                x: cx + ladder_offset * nx + ladder_half_0 * ux;
+                y: cy + ladder_offset * ny + ladder_half_0 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset - 20 * scale) * nx - ladder_half_1 * ux;
+                y: cy + (ladder_offset - 20 * scale) * ny - ladder_half_1 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset - 20 * scale) * nx + ladder_half_1 * ux;
+                y: cy + (ladder_offset - 20 * scale) * ny + ladder_half_1 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset - 40 * scale) * nx - ladder_half_2 * ux;
+                y: cy + (ladder_offset - 40 * scale) * ny - ladder_half_2 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset - 40 * scale) * nx + ladder_half_2 * ux;
+                y: cy + (ladder_offset - 40 * scale) * ny + ladder_half_2 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset - 60 * scale) * nx - ladder_half_3 * ux;
+                y: cy + (ladder_offset - 60 * scale) * ny - ladder_half_3 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset - 60 * scale) * nx + ladder_half_3 * ux;
+                y: cy + (ladder_offset - 60 * scale) * ny + ladder_half_3 * uy;
+            }
+
+            MoveTo {
+                x: cx + (ladder_offset - 80 * scale) * nx - ladder_half_4 * ux;
+                y: cy + (ladder_offset - 80 * scale) * ny - ladder_half_4 * uy;
+            }
+
+            LineTo {
+                x: cx + (ladder_offset - 80 * scale) * nx + ladder_half_4 * ux;
+                y: cy + (ladder_offset - 80 * scale) * ny + ladder_half_4 * uy;
+            }
+        }
+
+        // numbers of the pitch ladder at both ends of the long lines, upright; slots at the
+        // multiples of 10 around the pitch. Only less than 12.5 degree from the pitch, later
+        // than their line (17.5): their centers are 46 units from the line's middle, the glyphs
+        // reach about 12 further, which stays inside the bank scale (84 units from the center,
+        // less its stroke) up to 12.9 degree, at any roll.
+        Text {
+            x: (cx + (ladder_offset10 + 40 * scale) * nx - 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 + 40 * scale) * ny - 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 - 10) <= 90 && (ladder_base10 - 10) != 0 && abs(pitch_deg - (ladder_base10 - 10)) < 12.5;
+            text: "\{(ladder_base10 - 10)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + (ladder_offset10 + 40 * scale) * nx + 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 + 40 * scale) * ny + 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 - 10) <= 90 && (ladder_base10 - 10) != 0 && abs(pitch_deg - (ladder_base10 - 10)) < 12.5;
+            text: "\{(ladder_base10 - 10)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + ladder_offset10 * nx - 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + ladder_offset10 * ny - 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10) <= 90 && ladder_base10 != 0 && abs(pitch_deg - ladder_base10) < 12.5;
+            text: "\{ladder_base10}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + ladder_offset10 * nx + 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + ladder_offset10 * ny + 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10) <= 90 && ladder_base10 != 0 && abs(pitch_deg - ladder_base10) < 12.5;
+            text: "\{ladder_base10}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + (ladder_offset10 - 40 * scale) * nx - 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 - 40 * scale) * ny - 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 + 10) <= 90 && (ladder_base10 + 10) != 0 && abs(pitch_deg - (ladder_base10 + 10)) < 12.5;
+            text: "\{(ladder_base10 + 10)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + (ladder_offset10 - 40 * scale) * nx + 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 - 40 * scale) * ny + 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 + 10) <= 90 && (ladder_base10 + 10) != 0 && abs(pitch_deg - (ladder_base10 + 10)) < 12.5;
+            text: "\{(ladder_base10 + 10)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + (ladder_offset10 - 80 * scale) * nx - 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 - 80 * scale) * ny - 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 + 20) <= 90 && (ladder_base10 + 20) != 0 && abs(pitch_deg - (ladder_base10 + 20)) < 12.5;
+            text: "\{(ladder_base10 + 20)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Text {
+            x: (cx + (ladder_offset10 - 80 * scale) * nx + 46 * scale * ux - 12 * scale) * 1px;
+            y: (cy + (ladder_offset10 - 80 * scale) * ny + 46 * scale * uy - 8 * scale) * 1px;
+            width: 24 * u;
+            height: 16 * u;
+            visible: abs(ladder_base10 + 20) <= 90 && (ladder_base10 + 20) != 0 && abs(pitch_deg - (ladder_base10 + 20)) < 12.5;
+            text: "\{(ladder_base10 + 20)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        // bank scale: an arc from -60 to 60 degree with ticks at 0, 10, 20, 30, 45 and 60
+        // degree, without numbers: all of the attitude is redrawn every frame, and numbers
+        // would cost about 1 ms each on a microcontroller. In two paths, the left and the
+        // right half: in one, the outline of the stroke needs more than 512 rasterizer
+        // cells in a band, the cells then grow to a 16 KB block. Static, the box larger by
+        // the stroke width (Slint fits the viewbox of a stroke into the box less the stroke
+        // width), so the viewbox is drawn 1:1.
+        Path {
+            viewbox-x: cx - 82.406 * scale;
+            viewbox-y: cy - 95 * scale;
+            viewbox-width: 83.406 * scale;
+            viewbox-height: 54 * scale;
+            x: self.viewbox-x * 1px - self.stroke-width / 2;
+            y: self.viewbox-y * 1px - self.stroke-width / 2;
+            width: self.viewbox-width * 1px + self.stroke-width;
+            height: self.viewbox-height * 1px + self.stroke-width;
+            stroke: Theme.marking;
+            stroke-width: Theme.marking_width * scale / 2;
+
+            MoveTo {
+                x: cx - 72.746 * scale;
+                y: cy - 42 * scale;
+            }
+
+            ArcTo {
+                x: cx;
+                y: cy - 84 * scale;
+                radius-x: 84 * scale;
+                radius-y: 84 * scale;
+                sweep: true;
+            }
+
+            MoveTo {
+                x: cx - 72.746 * scale;
+                y: cy - 42 * scale;
+            }
+
+            LineTo {
+                x: cx - 81.406 * scale;
+                y: cy - 47 * scale;
+            }
+
+            MoveTo {
+                x: cx - 59.397 * scale;
+                y: cy - 59.397 * scale;
+            }
+
+            LineTo {
+                x: cx - 63.64 * scale;
+                y: cy - 63.64 * scale;
+            }
+
+            MoveTo {
+                x: cx - 42 * scale;
+                y: cy - 72.746 * scale;
+            }
+
+            LineTo {
+                x: cx - 47 * scale;
+                y: cy - 81.406 * scale;
+            }
+
+            MoveTo {
+                x: cx - 28.73 * scale;
+                y: cy - 78.934 * scale;
+            }
+
+            LineTo {
+                x: cx - 30.782 * scale;
+                y: cy - 84.572 * scale;
+            }
+
+            MoveTo {
+                x: cx - 14.586 * scale;
+                y: cy - 82.724 * scale;
+            }
+
+            LineTo {
+                x: cx - 15.628 * scale;
+                y: cy - 88.633 * scale;
+            }
+
+            MoveTo {
+                x: cx;
+                y: cy - 84 * scale;
+            }
+
+            LineTo {
+                x: cx;
+                y: cy - 94 * scale;
+            }
+        }
+
+
+        Path {
+            viewbox-x: cx - 1 * scale;
+            viewbox-y: cy - 89.633 * scale;
+            viewbox-width: 83.406 * scale;
+            viewbox-height: 48.633 * scale;
+            x: self.viewbox-x * 1px - self.stroke-width / 2;
+            y: self.viewbox-y * 1px - self.stroke-width / 2;
+            width: self.viewbox-width * 1px + self.stroke-width;
+            height: self.viewbox-height * 1px + self.stroke-width;
+            stroke: Theme.marking;
+            stroke-width: Theme.marking_width * scale / 2;
+
+            MoveTo {
+                x: cx;
+                y: cy - 84 * scale;
+            }
+
+            ArcTo {
+                x: cx + 72.746 * scale;
+                y: cy - 42 * scale;
+                radius-x: 84 * scale;
+                radius-y: 84 * scale;
+                sweep: true;
+            }
+
+            MoveTo {
+                x: cx + 14.586 * scale;
+                y: cy - 82.724 * scale;
+            }
+
+            LineTo {
+                x: cx + 15.628 * scale;
+                y: cy - 88.633 * scale;
+            }
+
+            MoveTo {
+                x: cx + 28.73 * scale;
+                y: cy - 78.934 * scale;
+            }
+
+            LineTo {
+                x: cx + 30.782 * scale;
+                y: cy - 84.572 * scale;
+            }
+
+            MoveTo {
+                x: cx + 42 * scale;
+                y: cy - 72.746 * scale;
+            }
+
+            LineTo {
+                x: cx + 47 * scale;
+                y: cy - 81.406 * scale;
+            }
+
+            MoveTo {
+                x: cx + 59.397 * scale;
+                y: cy - 59.397 * scale;
+            }
+
+            LineTo {
+                x: cx + 63.64 * scale;
+                y: cy - 63.64 * scale;
+            }
+
+            MoveTo {
+                x: cx + 72.746 * scale;
+                y: cy - 42 * scale;
+            }
+
+            LineTo {
+                x: cx + 81.406 * scale;
+                y: cy - 47 * scale;
+            }
+        }
+
+        // bank pointer: a triangle inside the bank scale, it turns with the horizon and points at
+        // the bank angle; its box follows it, counterclockwise and closed
+        Path {
+            private property <float> tip_x: cx - 83 * scale * nx;
+            private property <float> tip_y: cy - 83 * scale * ny;
+            private property <float> left_x: cx - 73 * scale * nx - 6 * scale * ux;
+            private property <float> left_y: cy - 73 * scale * ny - 6 * scale * uy;
+            private property <float> right_x: cx - 73 * scale * nx + 6 * scale * ux;
+            private property <float> right_y: cy - 73 * scale * ny + 6 * scale * uy;
+            viewbox-x: min(tip_x, left_x, right_x) - 1;
+            viewbox-y: min(tip_y, left_y, right_y) - 1;
+            viewbox-width: max(tip_x, left_x, right_x) - self.viewbox-x + 1;
+            viewbox-height: max(tip_y, left_y, right_y) - self.viewbox-y + 1;
+            x: self.viewbox-x * 1px;
+            y: self.viewbox-y * 1px;
+            width: self.viewbox-width * 1px;
+            height: self.viewbox-height * 1px;
+            fill: Theme.marker;
+
+            MoveTo {
+                x: tip_x;
+                y: tip_y;
+            }
+
+            LineTo {
+                x: left_x;
+                y: left_y;
+            }
+
+            LineTo {
+                x: right_x;
+                y: right_y;
+            }
+
+            LineTo {
+                x: tip_x;
+                y: tip_y;
+            }
+
+            Close { }
+        }
+
+        // aircraft symbol: two wings with downward inner ends, like in the attitude indicator;
+        // flat ends and square corners (the defaults: zeno builds round ones from arcs, slow on
+        // the RP2040). Static, the box larger by the stroke width, so the viewbox is drawn 1:1.
+        Path {
+            viewbox-x: cx - 57 * scale;
+            viewbox-y: cy - 1 * scale;
+            viewbox-width: 114 * scale;
+            viewbox-height: 11 * scale;
+            x: self.viewbox-x * 1px - self.stroke-width / 2;
+            y: self.viewbox-y * 1px - self.stroke-width / 2;
+            width: self.viewbox-width * 1px + self.stroke-width;
+            height: self.viewbox-height * 1px + self.stroke-width;
+            stroke: Theme.marker;
+            stroke-width: Theme.vehicle_width * scale;
+
+            MoveTo {
+                x: cx - 56 * scale;
+                y: cy;
+            }
+
+            LineTo {
+                x: cx - 20 * scale;
+                y: cy;
+            }
+
+            LineTo {
+                x: cx - 20 * scale;
+                y: cy + 9 * scale;
+            }
+
+            MoveTo {
+                x: cx + 56 * scale;
+                y: cy;
+            }
+
+            LineTo {
+                x: cx + 20 * scale;
+                y: cy;
+            }
+
+            LineTo {
+                x: cx + 20 * scale;
+                y: cy + 9 * scale;
+            }
+        }
+
+        // center dot of the aircraft symbol
+        Rectangle {
+            x: (cx - Theme.vehicle_width * scale / 1px) * 1px;
+            y: (cy - Theme.vehicle_width * scale / 1px) * 1px;
+            width: 2 * Theme.vehicle_width * scale;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.marker;
+        }
+
+        // airspeed and heading as numbers, in the lower corners of the attitude
+        Rectangle {
+            x: 44 * u;
+            y: 219 * u;
+            width: 54 * u;
+            height: 18 * u;
+            background: Theme.background;
+
+            Text {
+                text: "IAS \{round(root.airspeed)}";
+                color: root.airspeed > v_ne ? Theme.limit
+                    : root.airspeed > v_no ? Theme.caution : Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+        }
+
+
+        Rectangle {
+            x: 210 * u;
+            y: 219 * u;
+            width: 54 * u;
+            height: 18 * u;
+            background: Theme.background;
+
+            Text {
+                text: "HDG \{hdg_shown < 10 ? "00" : hdg_shown < 100 ? "0" : ""}\{hdg_shown}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+        }
+
+        // ---- vertical speed tape: the numbers in fpm, right-aligned in 33 units (5 characters such
+        // as "-1500"), the ticks beside them
+        Rectangle {
+            x: 0 * u;
+            y: 28 * u;
+            width: 40 * u;
+            height: 212 * u;
+            background: Theme.bezel;
+            clip: true;
+
+            // ticks every 100
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 100 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 100 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 90 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 90 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 80 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 80 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 70 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 70 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 60 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 60 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 50 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 50 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 40 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 40 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 30 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 30 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 20 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 20 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 + 10 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 + 10 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 0 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 0 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 10 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 10 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 20 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 20 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 30 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 30 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 40 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 40 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 50 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 50 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 60 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 60 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 70 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 70 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 80 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 80 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 90 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 90 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 100 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 100 * scale);
+                }
+
+                MoveTo {
+                    x: 37 * scale;
+                    y: round(106 * scale + vs_offset100 - 110 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset100 - 110 * scale);
+                }
+            }
+
+            // long ticks every 500
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 + 100 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 + 100 * scale);
+                }
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 + 50 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 + 50 * scale);
+                }
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 - 0 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 - 0 * scale);
+                }
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 - 50 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 - 50 * scale);
+                }
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 - 100 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 - 100 * scale);
+                }
+
+                MoveTo {
+                    x: 34 * scale;
+                    y: round(106 * scale + vs_offset500 - 150 * scale);
+                }
+
+                LineTo {
+                    x: 40 * scale;
+                    y: round(106 * scale + vs_offset500 - 150 * scale);
+                }
+            }
+
+            // numbers every 500
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 + 100 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 - 1000}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 + 50 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 - 500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 - 0 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 + 0}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 - 50 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 + 500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 - 100 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 + 1000}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 0 * u;
+                y: (106 * scale + vs_offset500 - 150 * scale - 8 * scale) * 1px;
+                width: 33 * u;
+                height: 16 * u;
+                text: "\{vs_base500 + 1500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+        }
+
+        // ---- altitude tape
+        Rectangle {
+            x: 268 * u;
+            y: 28 * u;
+            width: 52 * u;
+            height: 212 * u;
+            background: Theme.bezel;
+            clip: true;
+
+            // ticks every 100
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 100 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 100 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 90 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 90 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 80 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 80 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 70 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 70 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 60 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 60 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 50 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 50 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 40 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 40 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 30 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 30 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 20 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 20 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 + 10 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 + 10 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 0 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 0 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 10 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 10 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 20 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 20 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 30 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 30 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 40 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 40 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 50 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 50 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 60 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 60 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 70 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 70 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 80 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 80 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 90 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 90 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 100 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 100 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset100 - 110 * scale);
+                }
+
+                LineTo {
+                    x: 5 * scale;
+                    y: round(106 * scale + alt_offset100 - 110 * scale);
+                }
+            }
+
+            // long ticks every 500
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 + 100 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 + 100 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 + 50 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 + 50 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 - 0 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 - 0 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 - 50 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 - 50 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 - 100 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 - 100 * scale);
+                }
+
+                MoveTo {
+                    x: 0 * scale;
+                    y: round(106 * scale + alt_offset500 - 150 * scale);
+                }
+
+                LineTo {
+                    x: 10 * scale;
+                    y: round(106 * scale + alt_offset500 - 150 * scale);
+                }
+            }
+
+            // numbers every 500
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 + 100 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 - 1000}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 + 50 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 - 500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 - 0 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 + 0}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 - 50 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 + 500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 - 100 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 + 1000}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: 12 * u;
+                y: (106 * scale + alt_offset500 - 150 * scale - 8 * scale) * 1px;
+                width: 40 * u;
+                height: 16 * u;
+                text: "\{alt_base500 + 1500}";
+                color: Theme.marking;
+                font-size: small_font_size;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+        }
+
+        // ---- heading tape, ticks at its lower edge
+
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 320 * u;
+            height: 28 * u;
+            background: Theme.bezel;
+            clip: true;
+
+            // ticks every 5 degree
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 150 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 150 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 135 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 135 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 120 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 120 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 105 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 105 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 90 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 90 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 75 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 75 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 60 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 60 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 45 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 45 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 30 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 30 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 - 15 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 - 15 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 0 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 0 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 15 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 15 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 30 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 30 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 45 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 45 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 60 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 60 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 75 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 75 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 90 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 90 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 105 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 105 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 120 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 120 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 135 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 135 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 150 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 150 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset5 + 165 * scale);
+                    y: 24 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset5 + 165 * scale);
+                    y: 28 * scale;
+                }
+            }
+
+            // long ticks every 15 degree, at the names
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 2 * scale / 2;
+                viewbox-y: 2 * scale / 2;
+                viewbox-width: self.width / 1px - 2 * scale;
+                viewbox-height: self.height / 1px - 2 * scale;
+                stroke: Theme.marking;
+                stroke-width: 2 * scale * 1px;
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 - 135 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 - 135 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 - 90 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 - 90 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 - 45 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 - 45 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 + 0 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 + 0 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 + 45 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 + 45 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 + 90 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 + 90 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 + 135 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 + 135 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset15 + 180 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset15 + 180 * scale);
+                    y: 28 * scale;
+                }
+            }
+
+            // N, E, S and W in orange, like on the heading card
+            Path {
+                width: parent.width;
+                height: parent.height;
+                // Slint fits the viewbox of a stroke into the box less the stroke width: the
+                // viewbox is that much smaller, so the coordinates are those of the parent
+                viewbox-x: 3 * scale / 2;
+                viewbox-y: 3 * scale / 2;
+                viewbox-width: self.width / 1px - 3 * scale;
+                viewbox-height: self.height / 1px - 3 * scale;
+                stroke: Theme.cardinal;
+                stroke-width: 3 * scale * 1px;
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset90 + 0 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset90 + 0 * scale);
+                    y: 28 * scale;
+                }
+
+                MoveTo {
+                    x: round(154 * scale - hdg_offset90 + 270 * scale);
+                    y: 20 * scale;
+                }
+
+                LineTo {
+                    x: round(154 * scale - hdg_offset90 + 270 * scale);
+                    y: 28 * scale;
+                }
+            }
+
+            // names every 15 degree
+            Text {
+                x: (154 * scale - hdg_offset15 - 135 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 - 45);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 - 90 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 - 30);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 - 45 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 - 15);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 + 0 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 + 0);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 + 45 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 + 15);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 + 90 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 + 30);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 + 135 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 + 45);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Text {
+                x: (154 * scale - hdg_offset15 + 180 * scale - 15 * scale) * 1px;
+                y: 2 * u;
+                width: 30 * u;
+                height: 16 * u;
+                text: heading_name(hdg_base15 + 60);
+                color: Theme.marking;
+                font-size: small_font_size;
+                horizontal-alignment: TextHorizontalAlignment.center;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            // the heading: a triangle at the lower edge, counterclockwise and closed
+            Path {
+                viewbox-x: 148 * scale;
+                viewbox-y: 20 * scale;
+                viewbox-width: 12 * scale;
+                viewbox-height: 9 * scale;
+                x: self.viewbox-x * 1px;
+                y: self.viewbox-y * 1px;
+                width: self.viewbox-width * 1px;
+                height: self.viewbox-height * 1px;
+                fill: Theme.marker;
+
+                MoveTo {
+                    x: 149 * scale;
+                    y: 28 * scale;
+                }
+
+                LineTo {
+                    x: 159 * scale;
+                    y: 28 * scale;
+                }
+
+                LineTo {
+                    x: 154 * scale;
+                    y: 21 * scale;
+                }
+
+                LineTo {
+                    x: 149 * scale;
+                    y: 28 * scale;
+                }
+
+                Close { }
+            }
+        }
+
+        // ---- current vertical speed and altitude, in fields over the middle of the tapes, with a
+        // point towards the attitude, inside the tape (the boxes end at the attitude, so it isn't
+        // redrawn with them); the numbers reach a little into the base of the point, which is
+        // still high enough there. In the small font like the other fields: the 40 units of the
+        // tape are too narrow for "-1850" in the larger one. Counterclockwise and static, from
+        // the corner after the vertical side of the tape, so the closing edge is vertical and
+        // doesn't change the direction Slint calculates (see counterclockwise() in
+        // tools/dial-paths.py).
+        Path {
+            viewbox-x: 0 * scale;
+            viewbox-y: 123 * scale;
+            viewbox-width: 40 * scale;
+            viewbox-height: 22 * scale;
+            x: self.viewbox-x * 1px;
+            y: self.viewbox-y * 1px;
+            width: self.viewbox-width * 1px;
+            height: self.viewbox-height * 1px;
+            fill: Theme.background;
+
+            MoveTo {
+                x: 0 * scale;
+                y: 144 * scale;
+            }
+
+            LineTo {
+                x: 35 * scale;
+                y: 144 * scale;
+            }
+
+            LineTo {
+                x: 40 * scale;
+                y: 134 * scale;
+            }
+
+            LineTo {
+                x: 35 * scale;
+                y: 124 * scale;
+            }
+
+            LineTo {
+                x: 0 * scale;
+                y: 124 * scale;
+            }
+
+            Close { }
+        }
+
+        Text {
+            x: 0 * u;
+            y: 124 * u;
+            width: 37 * u;
+            height: 20 * u;
+            text: "\{root.vertical_speed > 4 ? "+" : ""}\{round(root.vertical_speed / 10) * 10}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        Path {
+            viewbox-x: 268 * scale;
+            viewbox-y: 123 * scale;
+            viewbox-width: 52 * scale;
+            viewbox-height: 22 * scale;
+            x: self.viewbox-x * 1px;
+            y: self.viewbox-y * 1px;
+            width: self.viewbox-width * 1px;
+            height: self.viewbox-height * 1px;
+            fill: Theme.background;
+
+            MoveTo {
+                x: 320 * scale;
+                y: 124 * scale;
+            }
+
+            LineTo {
+                x: 273 * scale;
+                y: 124 * scale;
+            }
+
+            LineTo {
+                x: 268 * scale;
+                y: 134 * scale;
+            }
+
+            LineTo {
+                x: 273 * scale;
+                y: 144 * scale;
+            }
+
+            LineTo {
+                x: 320 * scale;
+                y: 144 * scale;
+            }
+
+            Close { }
+        }
+
+        Text {
+            x: 271 * u;
+            y: 124 * u;
+            width: 49 * u;
+            height: 20 * u;
+            text: "\{round(root.altitude)}";
+            color: Theme.marking;
+            font-size: small_font_size;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+    }
+}

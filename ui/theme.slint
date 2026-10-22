@@ -10,9 +10,10 @@ export global Theme {
     out property <color> ground: #8b5a2b;     // earth brown
     out property <color> marking: #dddddd;    // a dimmed white
     out property <color> marker: #e02020;     // red markers: heading marks, attitude vehicle symbol and bank pointer
-    out property <color> vehicle: #f08120ee;  // heading aircraft
+    out property <color> vehicle: #aaaaaa;    // heading aircraft
     out property <color> needles: #dddddd;    // needles and hands
     out property <color> bezel: #2a2a2a;      // dark grey ring of the round instruments
+    out property <color> tube: #505050;       // inclinometer tube, a little lighter than the bezel
     out property <color> selected: #1e64c8;   // background of the selected button
     out property <color> normal: #20a040;     // green arc, normal operating range
     out property <color> caution: #e0c020;    // yellow arc, caution range
@@ -30,6 +31,7 @@ export global Theme {
     // Only these font sizes are embedded for the device (FONT_SIZES in src/lib.rs, passed as
     // SLINT_FONT_SIZES by the build.rs of the firmwares), keep them in sync.
     out property <length> menu_font_size: 12px;  // menu and status line
+    out property <length> small_font_size: 12px; // labels with little room ("2 MIN")
     out property <length> font_size: 14px;       // labels of the instruments
     out property <length> large_font_size: 20px; // numbers on the dials, heading card
 }

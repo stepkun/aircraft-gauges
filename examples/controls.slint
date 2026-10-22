@@ -1,0 +1,40 @@
+// Copyright © 2026 Stephan Kunz
+// SPDX-License-Identifier: GPL-3.0-only
+// Controls of the test programs
+
+import { Slider } from "std-widgets.slint";
+import { Theme } from "@aircraft-gauges/lib.slint";
+
+// one value: name, slider and the value with its unit
+export component Control inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> unit;
+    in property <float> minimum;
+    in property <float> maximum;
+    // digits after the decimal point of the shown value
+    in property <int> digits: 0;
+    in-out property <float> value;
+
+    spacing: 8px;
+    Text {
+        text: root.label;
+        min-width: 110px;
+        vertical-alignment: center;
+        color: Theme.marking;
+    }
+
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+        min-width: 160px;
+    }
+
+    Text {
+        text: root.digits == 0 ? "\{round(root.value)} \{root.unit}" : "\{round(root.value * 100) / 100} \{root.unit}";
+        min-width: 90px;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        color: Theme.marking;
+    }
+}
