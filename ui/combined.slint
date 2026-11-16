@@ -135,8 +135,6 @@ export component Combined inherits Rectangle {
     private property <float> v_no: 129;
     private property <float> v_ne: 163;
 
-    background: transparent;    // show background of parent
-
     // all parts in a rectangle of 320 x 240 units, centered in the area the instrument is given
     Rectangle {
         x: (root.width - 320 * u) / 2;
@@ -760,8 +758,6 @@ export component Combined inherits Rectangle {
 
             // ticks every 100
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -994,8 +990,6 @@ export component Combined inherits Rectangle {
 
             // long ticks every 500
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -1151,8 +1145,6 @@ export component Combined inherits Rectangle {
 
             // ticks every 100
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -1385,8 +1377,6 @@ export component Combined inherits Rectangle {
 
             // long ticks every 500
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -1537,8 +1527,6 @@ export component Combined inherits Rectangle {
 
             // ticks every 5 degree
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -1771,8 +1759,6 @@ export component Combined inherits Rectangle {
 
             // long ticks every 15 degree, at the names
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 2 * scale / 2;
@@ -1865,8 +1851,6 @@ export component Combined inherits Rectangle {
 
             // N, E, S and W in orange, like on the heading card
             Path {
-                width: parent.width;
-                height: parent.height;
                 // Slint fits the viewbox of a stroke into the box less the stroke width: the
                 // viewbox is that much smaller, so the coordinates are those of the parent
                 viewbox-x: 3 * scale / 2;

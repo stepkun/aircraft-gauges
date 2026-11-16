@@ -115,7 +115,6 @@ export component CombinedPanel inherits Window {
             Control {
                 label: "airspeed";
                 unit: "kt";
-                minimum: 0;
                 maximum: 240;
                 value <=> root.airspeed;
             }
@@ -123,7 +122,6 @@ export component CombinedPanel inherits Window {
             Control {
                 label: "heading";
                 unit: "°";
-                minimum: 0;
                 maximum: 360;
                 value <=> root.heading;
             }

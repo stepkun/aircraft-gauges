@@ -81,8 +81,6 @@ export component VerticalSpeed inherits Rectangle {
         return center - distance * cos(a);
     }
 
-    background: transparent;    // show background of parent
-
     // all parts in a square of `size`, centered in the area the instrument is given
     Rectangle {
         x: (root.width - root.size) / 2;

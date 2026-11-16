@@ -49,8 +49,6 @@ export component Heading inherits Rectangle {
     // reads each property once per path; in a function it reads them again for every call,
     // inlines the sine and cosine into it, and each read costs a dependency node of heap.
 
-    background: transparent;    // show background of parent
-
     // all parts in a square of `size`, centered in the area the instrument is given
     Rectangle {
         x: (root.width - root.size) / 2;

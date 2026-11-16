@@ -68,8 +68,6 @@ export component TurnCoordinator inherits Rectangle {
     // Rectangle reaches pixels outside the redrawn region, which then keep an old value.
     private property <float> ball_x: round(center - max(-1, min(1, root.slip)) * (tube_half_width - ball_radius - 1));
 
-    background: transparent;    // show background of parent
-
     // all parts in a square of `size`, centered in the area the instrument is given
     Rectangle {
         x: (root.width - root.size) / 2;

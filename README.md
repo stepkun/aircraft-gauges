@@ -20,7 +20,7 @@ and [x-plane](https://github.com/stepkun/x-plane) (instrument panel for X-Plane)
 ```toml
 [build-dependencies]
 aircraft-gauges = { path = "../aircraft-gauges" }
-slint-build = "1.18"
+slint-build = "1.19"
 ```
 
 `build.rs`:
@@ -28,10 +28,14 @@ slint-build = "1.18"
 ```rust
 fn main() {
     let config = slint_build::CompilerConfiguration::new()
+        .with_edition((1, 19))
         .with_library_paths(aircraft_gauges::library_paths());
     slint_build::compile_with_config("ui/app.slint", config).unwrap();
 }
 ```
+
+The library also compiles with Slint 1.18, without `with_edition`, which came with 1.19; the
+instruments look the same with and without the edition.
 
 `ui/app.slint`:
 

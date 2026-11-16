@@ -159,7 +159,6 @@ export component BasicPanel inherits Window {
             Control {
                 label: "airspeed";
                 unit: "kt";
-                minimum: 0;
                 maximum: 240;
                 value <=> root.airspeed;
             }
@@ -167,7 +166,6 @@ export component BasicPanel inherits Window {
             Control {
                 label: "heading";
                 unit: "°";
-                minimum: 0;
                 maximum: 360;
                 value <=> root.heading;
             }
@@ -191,7 +189,6 @@ export component BasicPanel inherits Window {
 
             Control {
                 label: "slip";
-                unit: "";
                 minimum: -1.2;
                 maximum: 1.2;
                 digits: 2;

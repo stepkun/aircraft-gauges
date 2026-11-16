@@ -134,8 +134,6 @@ export component Attitude inherits Rectangle {
     // The coordinates are written out instead of calling functions: in a function every call
     // reads the properties again, and each read costs a dependency node of heap.
 
-    background: transparent;    // show background of parent
-
     // all parts in a square of `size`, centered in the area the instrument is given
     Rectangle {
         x: (root.width - root.size) / 2;

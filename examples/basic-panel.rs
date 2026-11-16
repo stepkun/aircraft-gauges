@@ -16,6 +16,7 @@ use slint_interpreter::{Compiler, ComponentHandle};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut compiler = Compiler::default();
+    compiler.set_edition((1, 19));
     compiler.set_library_paths(aircraft_gauges::library_paths());
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/basic-panel.slint");
     let result = spin_on::spin_on(compiler.build_from_path(&path));

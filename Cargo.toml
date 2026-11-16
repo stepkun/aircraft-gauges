@@ -13,5 +13,5 @@ include = ["/src", "/ui", "/LICENSE", "/README.md"]
 [dependencies]
 
 [dev-dependencies]
-slint-interpreter = "1.18.1"
+slint-interpreter = "1.19"
 spin_on = "0.1.1"
